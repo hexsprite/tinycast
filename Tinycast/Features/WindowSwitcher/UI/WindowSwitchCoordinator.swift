@@ -8,6 +8,7 @@ final class WindowSwitchCoordinator {
     private let palette: PaletteState
     private let paletteCoordinator: PaletteCoordinator
     private unowned let core: AppCore
+    private var remoteTask: Task<Void, Never>?
 
     init(
         settings: AppSettings, appIndex: AppIndex, session: WindowSwitchSession,
@@ -24,18 +25,41 @@ final class WindowSwitchCoordinator {
     func applyEnabled() {
         appIndex.setCommandsVisible([.switchWindows], settings.navigationEnabled)
         guard !settings.navigationEnabled else { return }
+        remoteTask?.cancel()
         session.reset()
         if palette.mode == .switchWindows { palette.prepare(mode: .launcher) }
     }
 
     func show() {
         guard settings.navigationEnabled else { return }
+        if paletteCoordinator.isShowing(.switchWindows) {
+            remoteTask?.cancel()
+            paletteCoordinator.hidePalette()
+            return
+        }
         guard Permissions.ensureAccessibility() else {
             Task { await self.reportPermissionFailure() }
             return
         }
-        session.present(WindowSwitchSweep.snapshot(ranks: WindowZOrder.appRanks()))
+        remoteTask?.cancel()
+        let snapshot = WindowSwitchSweep.snapshot(ranks: WindowZOrder.appRanks())
+        let applications = snapshot.applications
+        let knownWindowIDs = Set(snapshot.entries.map(\.windowID))
+        let revision = session.present(snapshot)
         paletteCoordinator.togglePalette(mode: .switchWindows)
+        remoteTask = Task { [weak self] in
+            let remote = await WindowSwitchSweep.remoteSnapshot(
+                applications: applications, excluding: knownWindowIDs)
+            guard let self, !Task.isCancelled else { return }
+            let selectedID =
+                palette.mode == .switchWindows ? session.entryID(at: palette.selection) : nil
+            guard session.merge(remote, revision: revision) else { return }
+            guard palette.mode == .switchWindows, let selectedID,
+                let index = session.index(ofEntryID: selectedID)
+            else { return }
+            palette.selection = index
+            palette.followToken = UUID()
+        }
     }
 
     func activate(_ entry: WindowSwitchEntry) {
@@ -44,7 +68,7 @@ final class WindowSwitchCoordinator {
             return
         }
         // Resolved before the hide: hiding resets the session, which drops the element table.
-        guard let element = session.element(for: entry.handle), !element.app.isTerminated else {
+        guard let element = session.element(for: entry.windowID), !element.app.isTerminated else {
             Task { await self.reportGone(entry) }
             return
         }

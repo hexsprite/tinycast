@@ -13,11 +13,12 @@ struct WindowSwitchTests {
     }
 
     static func entry(
-        _ handle: Int, app: String = "Safari", title: String = "Window",
-        minimized: Bool = false, rank: Int = 0
+        _ windowID: UInt32, app: String = "Safari", title: String = "Window",
+        minimized: Bool = false, rank: Int = 0, order: Int? = nil
     ) -> WindowSwitchEntry {
         WindowSwitchEntry(
-            handle: handle, appName: app, bundleID: "com.example.\(app.lowercased())",
+            windowID: windowID, order: order ?? Int(windowID), appName: app,
+            bundleID: "com.example.\(app.lowercased())",
             iconURL: nil, iconStamp: 0, title: title, isMinimized: minimized, appRank: rank)
     }
 
@@ -27,6 +28,7 @@ struct WindowSwitchTests {
         searchMapping()
         ordering()
         orderingIsTotal()
+        merging()
         ranking()
         rankingLimit()
 
@@ -35,7 +37,7 @@ struct WindowSwitchTests {
     }
 
     static func identity() {
-        expect(entry(7).id == "7", "the id is the handle, which is unique inside one sweep")
+        expect(entry(7).id == "7", "the id is the stable WindowServer id")
     }
 
     static func displayTitle() {
@@ -67,26 +69,46 @@ struct WindowSwitchTests {
             entry(4, app: "Zed", rank: .max)
         ])
         expect(
-            sorted.map(\.handle) == [2, 3, 0, 4, 1],
-            "front app first, then by rank, unranked next, minimized last: \(sorted.map(\.handle))")
+            sorted.map(\.windowID) == [2, 3, 0, 4, 1],
+            "front app first, then by rank, unranked next, minimized last: \(sorted.map(\.windowID))")
     }
 
     static func orderingIsTotal() {
         let entries = (0..<12).map {
-            entry($0, app: ["Mail", "Safari", "Zed"][$0 % 3], minimized: $0 % 4 == 0, rank: $0 % 3)
+            entry(
+                UInt32($0), app: ["Mail", "Safari", "Zed"][$0 % 3],
+                minimized: $0 % 4 == 0, rank: $0 % 3)
         }
         let once = WindowSwitchOrder.sorted(entries)
         let twice = WindowSwitchOrder.sorted(entries.reversed())
         expect(
-            once.map(\.handle) == twice.map(\.handle),
+            once.map(\.windowID) == twice.map(\.windowID),
             "the order is total, so a shuffled sweep sorts identically")
         expect(
-            once.map(\.handle).sorted() == entries.map(\.handle).sorted(),
+            once.map(\.windowID).sorted() == entries.map(\.windowID).sorted(),
             "sorting drops nothing")
         let split = once.firstIndex(where: \.isMinimized) ?? once.count
         expect(
             once[split...].allSatisfy(\.isMinimized),
             "minimized windows form one run at the end, never interleaved")
+    }
+
+    static func merging() {
+        let current = [entry(7, app: "Safari", title: "Published", rank: 0)]
+        let merged = WindowSwitchOrder.merging(
+            current,
+            with: [
+                entry(7, app: "Safari", title: "Remote duplicate", rank: 0),
+                entry(9, app: "Mail", title: "Other Space", rank: 1)
+            ])
+        expect(merged.map(\.windowID) == [7, 9], "remote windows merge into the sorted list")
+        expect(merged[0].title == "Published", "a remote duplicate never replaces a live AX entry")
+
+        let sameApp = WindowSwitchOrder.merging(
+            [entry(90, order: 0)], with: [entry(1, order: .max)])
+        expect(
+            sameApp.map(\.windowID) == [90, 1],
+            "a remote-only window follows the app's published front-to-back run")
     }
 
     static func ranking() {
@@ -96,13 +118,13 @@ struct WindowSwitchTests {
             entry(2, app: "Safari", title: "Inbox archive")
         ]
         expect(
-            WindowSwitchQuery.rank(entries, for: "").map(\.handle) == [0, 1, 2],
+            WindowSwitchQuery.rank(entries, for: "").map(\.windowID) == [0, 1, 2],
             "an empty query keeps the order it was handed")
         expect(
-            WindowSwitchQuery.rank(entries, for: "Inbox").first?.handle == 1,
+            WindowSwitchQuery.rank(entries, for: "Inbox").first?.windowID == 1,
             "the exact title beats the one that only starts with it")
         expect(
-            WindowSwitchQuery.rank(entries, for: "Safari").map(\.handle) == [1, 2],
+            WindowSwitchQuery.rank(entries, for: "Safari").map(\.windowID) == [1, 2],
             "the app name matches every one of its windows, in the order given")
         expect(
             WindowSwitchQuery.rank(entries, for: "zzz").isEmpty,
@@ -111,7 +133,7 @@ struct WindowSwitchTests {
 
     static func rankingLimit() {
         let entries = (0..<(WindowSwitchQuery.resultLimit + 50)).map {
-            entry($0, app: "Safari", title: "Tab \($0)")
+            entry(UInt32($0), app: "Safari", title: "Tab \($0)")
         }
         expect(
             WindowSwitchQuery.rank(entries, for: "").count == WindowSwitchQuery.resultLimit,

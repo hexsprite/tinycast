@@ -2,6 +2,15 @@ import AppKit
 // `@preconcurrency` downgrades AX diagnostics: `kAX…` are mutable C globals, but constant.
 @preconcurrency import ApplicationServices
 
+// Accessibility has no public cross-Space enumeration; remote tokens fill the capability gap.
+@_silgen_name("_AXUIElementGetWindow")
+func _AXUIElementGetWindow(
+    _ element: AXUIElement, _ windowID: UnsafeMutablePointer<CGWindowID>
+) -> AXError
+
+@_silgen_name("_AXUIElementCreateWithRemoteToken")
+func _AXUIElementCreateWithRemoteToken(_ data: CFData) -> Unmanaged<AXUIElement>?
+
 /// Every `AXUIElement` call in the feature. Shared, so the mover and the layout runner cannot
 /// disagree about what a window is or how one is written.
 @MainActor
@@ -13,6 +22,13 @@ enum AXWindowAccess {
 
     static let fullScreenAttribute = "AXFullScreen" as CFString
     static let fullScreenButtonAttribute = "AXFullScreenButton" as CFString
+
+    struct RemoteWindow: Sendable {
+        let windowID: UInt32
+        let elementID: UInt64
+        let title: String
+        let isMinimized: Bool
+    }
 
     // MARK: - Finding windows
 
@@ -39,6 +55,82 @@ enum AXWindowAccess {
             let windows = value as? [AXUIElement]
         else { return [] }
         return windows
+    }
+
+    nonisolated static func windowID(of window: AXUIElement) -> UInt32? {
+        var windowID: CGWindowID = 0
+        guard _AXUIElementGetWindow(window, &windowID) == .success, windowID != 0 else { return nil }
+        return windowID
+    }
+
+    nonisolated static func remoteWindows(
+        for pid: pid_t, matching targetIDs: Set<UInt32>, budgetMilliseconds: Double,
+        timeout: Float
+    ) -> [RemoteWindow] {
+        guard !targetIDs.isEmpty, let token = remoteToken(for: pid),
+            let bytes = CFDataGetMutableBytePtr(token)
+        else { return [] }
+        var remaining = targetIDs
+        var found: [RemoteWindow] = []
+        let start = ProcessInfo.processInfo.systemUptime
+
+        for elementID in UInt64.min..<UInt64.max {
+            if Task.isCancelled { break }
+            var elementID = elementID
+            memcpy(bytes + 12, &elementID, 8)
+            if let window = _AXUIElementCreateWithRemoteToken(token)?.takeRetainedValue() {
+                AXUIElementSetMessagingTimeout(window, timeout)
+                if let windowID = windowID(of: window), remaining.contains(windowID),
+                    string(window, kAXRoleAttribute) == (kAXWindowRole as String),
+                    string(window, kAXSubroleAttribute) == (kAXStandardWindowSubrole as String)
+                {
+                    found.append(
+                        RemoteWindow(
+                            windowID: windowID, elementID: elementID,
+                            title: string(window, kAXTitleAttribute) ?? "",
+                            isMinimized: bool(window, kAXMinimizedAttribute) == true))
+                    remaining.remove(windowID)
+                    if remaining.isEmpty { break }
+                }
+            }
+            if elementID.isMultiple(of: 64),
+                (ProcessInfo.processInfo.systemUptime - start) * 1_000 >= budgetMilliseconds
+            {
+                break
+            }
+        }
+        return found
+    }
+
+    nonisolated static func remoteWindow(
+        for pid: pid_t, elementID: UInt64, expectedWindowID: UInt32, timeout: Float
+    ) -> AXUIElement? {
+        guard let token = remoteToken(for: pid), let bytes = CFDataGetMutableBytePtr(token)
+        else { return nil }
+        var elementID = elementID
+        memcpy(bytes + 12, &elementID, 8)
+        guard let window = _AXUIElementCreateWithRemoteToken(token)?.takeRetainedValue() else {
+            return nil
+        }
+        AXUIElementSetMessagingTimeout(window, timeout)
+        guard windowID(of: window) == expectedWindowID,
+            string(window, kAXRoleAttribute) == (kAXWindowRole as String),
+            string(window, kAXSubroleAttribute) == (kAXStandardWindowSubrole as String)
+        else { return nil }
+        return window
+    }
+
+    // The AX remote-token ABI is pid, zero, `coco`, then the 64-bit element id.
+    nonisolated private static func remoteToken(for pid: pid_t) -> CFMutableData? {
+        guard let token = CFDataCreateMutable(kCFAllocatorDefault, 20) else { return nil }
+        CFDataSetLength(token, 20)
+        guard let bytes = CFDataGetMutableBytePtr(token) else { return nil }
+        memset(bytes, 0, 20)
+        var pid = pid
+        memcpy(bytes, &pid, 4)
+        var magic = Int32(0x636f636f)
+        memcpy(bytes + 8, &magic, 4)
+        return token
     }
 
     /// A real, restorable window: not a sheet, popover or minimized one, and it reports geometry.
@@ -195,14 +287,14 @@ enum AXWindowAccess {
         return (value as! AXUIElement)
     }
 
-    static func string(_ element: AXUIElement, _ attribute: String) -> String? {
+    nonisolated static func string(_ element: AXUIElement, _ attribute: String) -> String? {
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success
         else { return nil }
         return value as? String
     }
 
-    static func bool(_ element: AXUIElement, _ attribute: String) -> Bool? {
+    nonisolated static func bool(_ element: AXUIElement, _ attribute: String) -> Bool? {
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success
         else { return nil }

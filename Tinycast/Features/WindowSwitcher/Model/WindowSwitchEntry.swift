@@ -1,9 +1,11 @@
 import Foundation
 
-/// One open window the switcher offers. A handle, not an `AXUIElement`: this layer stays pure.
+/// One open window the switcher offers. An id, not an `AXUIElement`: this layer stays pure.
 struct WindowSwitchEntry: Identifiable, Hashable, Sendable {
-    /// The app's own front-to-back order, flattened across apps; also indexes the live elements.
-    let handle: Int
+    /// Stable across the AX and WindowServer paths for the life of the window.
+    let windowID: UInt32
+    /// The app's own front-to-back order; remote-only windows sort after its published ones.
+    let order: Int
     let appName: String
     let bundleID: String
     let iconURL: URL?
@@ -14,7 +16,7 @@ struct WindowSwitchEntry: Identifiable, Hashable, Sendable {
     let appRank: Int
 
     /// A string, because every palette list identifies its rows by one.
-    var id: String { String(handle) }
+    var id: String { String(windowID) }
 
     /// A document window with no title yet reads as its app rather than as a blank row.
     var displayTitle: String {

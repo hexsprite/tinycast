@@ -11,19 +11,19 @@ launcher and a still-recorded shortcut for either does nothing.
 
 ## Invariants
 
-- **The sweep is synchronous, and that is deliberate.** `WindowSwitchSweep.snapshot` visits apps and
-  their windows — one level, two AX reads each — where the menu walk descends a tree. A
-  `Task.detached` here would buy a "Reading windows…" state nobody would ever see, and cost a
-  revision counter to keep superseded sweeps from publishing. `WindowInventory` made the same call.
-- **A live `AXUIElement` never leaves the main actor, and never outlives the show.** The pure entry
-  carries a `handle`; `WindowSwitchSession` holds the `handle → Element` table `@ObservationIgnored`
-  and drops it in `reset()`, which `hidePalette` and every mode change call.
+- **The visible-Space sweep is synchronous; the other-Space sweep is bounded and concurrent.** The
+  first opens the palette immediately from `AXWindows`, focused and main. The second asks WindowServer
+  for missing ids, gives each app 250 ms on a task-group child, and merges only verified standard
+  windows. A revision prevents a closed or replaced screen from publishing stale results.
+- **A live `AXUIElement` never crosses an actor and never outlives the show.** The background sweep
+  returns only pid, WindowServer id, AX element id and row metadata. `WindowSwitchSession` retains live
+  published elements and remote references `@ObservationIgnored`, and drops both in `reset()`.
 - **Nothing in `Model/` knows what a window is.** `WindowSwitchEntry` takes `appRank` as a number
   someone else measured, so `WindowSwitchOrder` and `WindowSwitchQuery` stay Foundation-only and the
   harness compiles the shipped sources.
-- **The order is total.** `(isMinimized, appRank, appName, handle)` — so a sweep that enumerated apps
-  in a different order sorts identically, and minimized windows are always one run at the end rather
-  than interleaved.
+- **The order is total.** `(isMinimized, appRank, appName, appOrder, windowID)` — so a sweep that
+  enumerated apps in a different order sorts identically, and minimized windows are always one run at
+  the end rather than interleaved. Remote-only windows follow the app's published windows.
 - **Accessibility is gated twice**, on show and again on activate: a grant revoked while the palette
   is open must not reach `AXUIElementPerformAction`.
 - **Activation hides with `restoreFocus: false`.** Restoring focus reactivates the displaced app,
@@ -35,11 +35,11 @@ launcher and a still-recorded shortcut for either does nothing.
 
 | Piece | Holds |
 | --- | --- |
-| `Model/WindowSwitchEntry.swift` | one row: handle, app, title, minimized, rank, search fields |
+| `Model/WindowSwitchEntry.swift` | one row: WindowServer id, app order, title, minimized, rank, search fields |
 | `Model/WindowSwitchOrder.swift` | the MRU sort, pure and total |
 | `Model/WindowSwitchQuery.swift` | ranking over `SearchRelevance`, capped at 200 rows |
 | `Service/WindowZOrder.swift` | the one `CGWindowList` call: per-pid front rank |
-| `Service/WindowSwitchSweep.swift` | the AX sweep, and the live element table it hands back |
+| `Service/WindowSwitchSweep.swift` | fast AX sweep, remote WindowServer sweep and element references |
 | `Service/WindowSwitchSession.swift` | the observable state — snapshot, filtered rows, elements |
 | `UI/WindowSwitchCoordinator.swift` | show, activate, the switch, the failure reports |
 | `UI/WindowSwitchScreen.swift` | the `PaletteScreen` conformance and the two empty states |
@@ -53,25 +53,27 @@ layer 0 — the normal window band, not the menu bar, Dock or overlay panels —
 pid first appears. Only `kCGWindowName` is permission-gated, and titles come from AX instead, so the
 call needs no Screen Recording grant.
 
-The rank is therefore **per app, not per window**: mapping a `CGWindowID` onto an `AXUIElement` needs
-the private `_AXUIElementGetWindow`, and the app's own `kAXWindowsAttribute` order already gives the
-windows inside one app front-to-back. An app with nothing on screen — everything minimized, or every
-window on another Space — gets no rank at all and sorts after the ranked ones by name.
+The rank is therefore **per app, not per window**. `_AXUIElementGetWindow` supplies the stable id that
+joins published AX elements to WindowServer rows; the app's `AXWindows` order supplies its published
+front-to-back order. An app with nothing on screen gets no rank and sorts after ranked apps by name.
 
-The alternative was a long-lived `NSWorkspace.didActivateApplicationNotification` observer with its
-own LRU and its own lifetime. This needs neither, and it is right on the first summon after launch
-rather than after the user has switched apps once.
+The alternative was a long-lived activation observer with its own LRU and lifetime. This needs neither,
+and it is right on the first summon after launch rather than after the user has switched apps once.
 
 ## The sweep
 
-`WindowSwitchSweep` walks `WindowInventory.candidates()` — regular-policy, non-terminated, not us —
-and takes every window whose subrole is `AXStandardWindow`. That is looser than
-`WindowInventory.eligibleFrame` in two ways that both matter here: a **minimized** window is exactly
-what a switcher is for, and a window on another Space reports no frame until it is raised, so
-requiring one would hide it.
+The fast sweep walks `WindowInventory.candidates()` — regular-policy, non-terminated, not us — and
+merges `AXWindows`, `AXFocusedWindow` and `AXMainWindow`. The latter two are not hidden by the current
+Space filter, so they recover one other-Space window from many apps at no extra round trip. Every row
+must be an `AXStandardWindow`; minimized windows remain valid, and geometry is never required.
 
-Each element gets a 0.2 s messaging timeout, the same as the layout inventory and the menu walk, so
-one hung app cannot stall the summon.
+WindowServer's `.optionAll` list then names candidate ids absent from the fast result. A task-group
+child per app walks remote AX element ids through `_AXUIElementCreateWithRemoteToken`, matches them back
+with `_AXUIElementGetWindow`, and publishes only verified standard-window roots. The 250 ms per-app
+budget runs concurrently, so a sparse or hung AX tree cannot delay the palette or another app's result.
+Live elements stay on main: the worker returns the remote element id, and activation reconstructs and
+revalidates it before hiding the palette. No Screen Recording grant is needed because titles come from
+AX rather than `kCGWindowName`.
 
 The app icon rides on the entry as a `FileIconStamp` and its bundle URL, and the row draws it through
 `EntryIconView(source: .file(stamp:))` — so `IconCache` decodes once per app however many windows it
@@ -120,10 +122,9 @@ window's app quit between the sweep and the ↵.
 
 ## Testing
 
-`Tests/window-switch-test.swift` covers the pure half: the handle-derived id, the untitled-window
-fallback, the name/owner split in the search fields, the MRU order and its totality under a shuffled
-sweep, the minimized run at the end, ranking, and the 200-row cap under both an empty and a
-matching query.
+`Tests/window-switch-test.swift` covers the pure half: the WindowServer-derived id, untitled-window
+fallback, name/owner search fields, MRU order and totality, remote-result merging and deduplication,
+the minimized run at the end, ranking, and the 200-row cap under empty and matching queries.
 
 `WindowZOrder` and `WindowSwitchSweep` are not compiled into the harness and have no automated
 coverage — the AX and `CGWindowList` paths need manual verification, particularly:

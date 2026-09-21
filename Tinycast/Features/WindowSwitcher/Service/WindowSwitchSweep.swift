@@ -38,6 +38,7 @@ enum WindowSwitchSweep {
         var entries: [WindowSwitchEntry]
         var elements: [UInt32: Element]
         var applications: [Application]
+        var focusedWindowIDs: [pid_t: UInt32]
     }
 
     struct RemoteSnapshot: Sendable {
@@ -54,6 +55,7 @@ enum WindowSwitchSweep {
         var entries: [WindowSwitchEntry] = []
         var elements: [UInt32: Element] = [:]
         var applications: [Application] = []
+        var focusedWindowIDs: [pid_t: UInt32] = [:]
 
         for app in WindowInventory.candidates() {
             guard let bundleID = app.bundleIdentifier else { continue }
@@ -69,30 +71,37 @@ enum WindowSwitchSweep {
                     pid: pid, appName: appName, bundleID: bundleID, iconURL: iconURL,
                     iconStamp: iconStamp, appRank: appRank, isSource: pid == sourcePID))
 
-            func append(_ window: AXUIElement) {
+            @discardableResult
+            func append(_ window: AXUIElement) -> UInt32? {
                 AXUIElementSetMessagingTimeout(window, sweepTimeout)
-                guard isSwitchable(window), let windowID = AXWindowAccess.windowID(of: window),
-                    elements[windowID] == nil
-                else { return }
-                entries.append(
-                    WindowSwitchEntry(
-                        windowID: windowID, order: order, appName: appName, bundleID: bundleID,
-                        iconURL: iconURL, iconStamp: iconStamp,
-                        title: AXWindowAccess.string(window, kAXTitleAttribute) ?? "",
-                        isMinimized: AXWindowAccess.bool(window, kAXMinimizedAttribute) == true,
-                        appRank: appRank))
-                elements[windowID] = Element(
-                    app: app, application: application, window: window)
-                order += 1
+                guard isSwitchable(window), let windowID = AXWindowAccess.windowID(of: window)
+                else { return nil }
+                if elements[windowID] == nil {
+                    entries.append(
+                        WindowSwitchEntry(
+                            windowID: windowID, order: order, appName: appName, bundleID: bundleID,
+                            iconURL: iconURL, iconStamp: iconStamp,
+                            title: AXWindowAccess.string(window, kAXTitleAttribute) ?? "",
+                            isMinimized: AXWindowAccess.bool(window, kAXMinimizedAttribute) == true,
+                            appRank: appRank))
+                    elements[windowID] = Element(
+                        app: app, application: application, window: window)
+                    order += 1
+                }
+                return windowID
             }
 
             for window in AXWindowAccess.windows(in: application) { append(window) }
-            if let focused = AXWindowAccess.element(application, kAXFocusedWindowAttribute) {
-                append(focused)
+            if let focused = AXWindowAccess.element(application, kAXFocusedWindowAttribute),
+                let windowID = append(focused)
+            {
+                focusedWindowIDs[pid] = windowID
             }
             if let main = AXWindowAccess.element(application, kAXMainWindowAttribute) { append(main) }
         }
-        return Snapshot(entries: entries, elements: elements, applications: applications)
+        return Snapshot(
+            entries: entries, elements: elements, applications: applications,
+            focusedWindowIDs: focusedWindowIDs)
     }
 
     nonisolated static func remoteSnapshot(

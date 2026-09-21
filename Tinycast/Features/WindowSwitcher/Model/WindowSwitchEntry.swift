@@ -28,3 +28,23 @@ struct WindowSwitchEntry: Identifiable, Hashable, Sendable {
         [SearchAlias.name(displayTitle), SearchAlias.owner(appName)]
     }
 }
+
+struct WindowSwitchHistory: Sendable {
+    private var sourceWindowID: UInt32?
+    private var destinationPID: pid_t?
+
+    mutating func record(sourceWindowID: UInt32, destinationPID: pid_t) {
+        self.sourceWindowID = sourceWindowID
+        self.destinationPID = destinationPID
+    }
+
+    mutating func preferredWindowID(currentPID: pid_t?) -> UInt32? {
+        guard currentPID == destinationPID else {
+            self = Self()
+            return nil
+        }
+        return sourceWindowID
+    }
+
+    mutating func clear() { self = Self() }
+}

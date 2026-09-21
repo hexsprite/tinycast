@@ -10,15 +10,20 @@ final class WindowSwitchSession {
 
     private var query = ""
     private var revision = 0
+    private var preferredWindowID: UInt32?
     /// Live AX handles, so they are never observed and never outlive the show.
     @ObservationIgnored private var elements: [UInt32: WindowSwitchSweep.Element] = [:]
     @ObservationIgnored private var remoteReferences: [UInt32: WindowSwitchSweep.RemoteReference] = [:]
 
     @discardableResult
-    func present(_ snapshot: WindowSwitchSweep.Snapshot) -> Int {
+    func present(
+        _ snapshot: WindowSwitchSweep.Snapshot, preferredWindowID: UInt32? = nil
+    ) -> Int {
         revision &+= 1
         isDiscovering = true
-        self.snapshot = WindowSwitchOrder.sorted(snapshot.entries)
+        self.preferredWindowID = preferredWindowID
+        self.snapshot = WindowSwitchOrder.sorted(
+            snapshot.entries, preferredWindowID: preferredWindowID)
         elements = snapshot.elements
         remoteReferences = [:]
         applyQuery()
@@ -34,7 +39,8 @@ final class WindowSwitchSession {
                 remoteReferences[entry.windowID] = reference
             }
         }
-        snapshot = WindowSwitchOrder.merging(snapshot, with: remote.entries)
+        snapshot = WindowSwitchOrder.merging(
+            snapshot, with: remote.entries, preferredWindowID: preferredWindowID)
         applyQuery()
         return true
     }
@@ -60,6 +66,7 @@ final class WindowSwitchSession {
         isDiscovering = false
         elements = [:]
         remoteReferences = [:]
+        preferredWindowID = nil
         query = ""
     }
 

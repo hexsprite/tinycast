@@ -26,8 +26,10 @@ struct WindowSwitchTests {
         identity()
         displayTitle()
         searchMapping()
+        history()
         ordering()
         orderingIsTotal()
+        preferredWindow()
         merging()
         ranking()
         rankingLimit()
@@ -58,6 +60,20 @@ struct WindowSwitchTests {
         expect(
             aliases.contains { $0.text == "Safari" && $0.role == .owner },
             "the app rides as owner: every window of one app shares it")
+    }
+
+    static func history() {
+        var history = WindowSwitchHistory()
+        history.record(sourceWindowID: 7, destinationPID: 20)
+        expect(
+            history.preferredWindowID(currentPID: 20) == 7,
+            "the source window is preferred while the destination app remains current")
+        expect(
+            history.preferredWindowID(currentPID: 21) == nil,
+            "another current app clears the switch-back preference")
+        expect(
+            history.preferredWindowID(currentPID: 20) == nil,
+            "a cleared preference cannot become stale when the old destination returns")
     }
 
     static func ordering() {
@@ -93,6 +109,19 @@ struct WindowSwitchTests {
             "minimized windows form one run at the end, never interleaved")
     }
 
+    static func preferredWindow() {
+        let entries = [
+            entry(1, app: "Current", rank: 0),
+            entry(2, app: "Previous", minimized: true, rank: 1)
+        ]
+        expect(
+            WindowSwitchOrder.sorted(entries, preferredWindowID: 2).map(\.windowID) == [2, 1],
+            "the last source window becomes the default even when minimized")
+        expect(
+            WindowSwitchOrder.sorted(entries, preferredWindowID: 99).map(\.windowID) == [1, 2],
+            "a missing preferred window leaves the normal order unchanged")
+    }
+
     static func merging() {
         let current = [entry(7, app: "Safari", title: "Published", rank: 0)]
         let merged = WindowSwitchOrder.merging(
@@ -109,6 +138,12 @@ struct WindowSwitchTests {
         expect(
             sameApp.map(\.windowID) == [90, 1],
             "a remote-only window follows the app's published front-to-back run")
+
+        let preferredRemote = WindowSwitchOrder.merging(
+            [entry(7)], with: [entry(9, rank: 1)], preferredWindowID: 9)
+        expect(
+            preferredRemote.map(\.windowID) == [9, 7],
+            "a preferred window stays first when it arrives from remote discovery")
     }
 
     static func ranking() {

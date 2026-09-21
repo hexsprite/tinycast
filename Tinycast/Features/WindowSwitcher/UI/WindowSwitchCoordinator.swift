@@ -9,6 +9,8 @@ final class WindowSwitchCoordinator {
     private let paletteCoordinator: PaletteCoordinator
     private unowned let core: AppCore
     private var remoteTask: Task<Void, Never>?
+    private var sourceWindowID: UInt32?
+    private var history = WindowSwitchHistory()
 
     init(
         settings: AppSettings, appIndex: AppIndex, session: WindowSwitchSession,
@@ -26,6 +28,8 @@ final class WindowSwitchCoordinator {
         appIndex.setCommandsVisible([.switchWindows], settings.navigationEnabled)
         guard !settings.navigationEnabled else { return }
         remoteTask?.cancel()
+        sourceWindowID = nil
+        history.clear()
         session.reset()
         if palette.mode == .switchWindows { palette.prepare(mode: .launcher) }
     }
@@ -42,24 +46,31 @@ final class WindowSwitchCoordinator {
             return
         }
         remoteTask?.cancel()
+        let sourcePID = paletteCoordinator.targetApp?.processIdentifier
         let snapshot = WindowSwitchSweep.snapshot(
-            ranks: WindowZOrder.appRanks(),
-            sourcePID: paletteCoordinator.targetApp?.processIdentifier)
+            ranks: WindowZOrder.appRanks(), sourcePID: sourcePID)
+        sourceWindowID = sourcePID.flatMap { snapshot.focusedWindowIDs[$0] }
+        let preferredWindowID = history.preferredWindowID(currentPID: sourcePID)
         let applications = snapshot.applications
         let knownWindowIDs = Set(snapshot.entries.map(\.windowID))
-        let revision = session.present(snapshot)
+        let revision = session.present(snapshot, preferredWindowID: preferredWindowID)
         paletteCoordinator.togglePalette(mode: .switchWindows)
         remoteTask = Task { [weak self] in
             let remote = await WindowSwitchSweep.remoteSnapshot(
                 applications: applications, excluding: knownWindowIDs)
             guard let self, !Task.isCancelled else { return }
+            let wasDefaultSelection = palette.selection == 0
             let selectedID =
                 palette.mode == .switchWindows ? session.entryID(at: palette.selection) : nil
             guard session.merge(remote, revision: revision) else { return }
-            guard palette.mode == .switchWindows, let selectedID,
-                let index = session.index(ofEntryID: selectedID)
-            else { return }
-            palette.selection = index
+            guard palette.mode == .switchWindows else { return }
+            if wasDefaultSelection, let preferredWindowID,
+                session.entryID(at: 0) == String(preferredWindowID)
+            {
+                palette.selection = 0
+            } else if let selectedID, let index = session.index(ofEntryID: selectedID) {
+                palette.selection = index
+            }
             palette.followToken = UUID()
         }
     }
@@ -78,6 +89,13 @@ final class WindowSwitchCoordinator {
         paletteCoordinator.hidePalette(restoreFocus: false)
         if entry.isMinimized { _ = AXWindowAccess.unminimize(element.window) }
         AXWindowAccess.focus(element.window, in: element.application, of: element.app)
+        if let sourceWindowID, sourceWindowID != entry.windowID {
+            history.record(
+                sourceWindowID: sourceWindowID,
+                destinationPID: element.app.processIdentifier)
+        } else {
+            history.clear()
+        }
     }
 
     // MARK: - Reporting

@@ -6,6 +6,7 @@ final class WindowSwitchSession {
     private(set) var snapshot: [WindowSwitchEntry] = []
     /// The rows the list reads: ranked once per query change, so one keystroke ranks once.
     private(set) var filtered: [WindowSwitchEntry] = []
+    private(set) var isDiscovering = false
 
     private var query = ""
     private var revision = 0
@@ -16,6 +17,7 @@ final class WindowSwitchSession {
     @discardableResult
     func present(_ snapshot: WindowSwitchSweep.Snapshot) -> Int {
         revision &+= 1
+        isDiscovering = true
         self.snapshot = WindowSwitchOrder.sorted(snapshot.entries)
         elements = snapshot.elements
         remoteReferences = [:]
@@ -25,6 +27,7 @@ final class WindowSwitchSession {
 
     func merge(_ remote: WindowSwitchSweep.RemoteSnapshot, revision: Int) -> Bool {
         guard revision == self.revision else { return false }
+        isDiscovering = false
         let existingIDs = Set(snapshot.map(\.windowID))
         for entry in remote.entries where !existingIDs.contains(entry.windowID) {
             if let reference = remote.references[entry.windowID] {
@@ -54,6 +57,7 @@ final class WindowSwitchSession {
         revision &+= 1
         snapshot = []
         filtered = []
+        isDiscovering = false
         elements = [:]
         remoteReferences = [:]
         query = ""

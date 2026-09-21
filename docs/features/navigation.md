@@ -73,9 +73,12 @@ with `_AXUIElementGetWindow`, and publishes only verified standard-window roots.
 low-id pass. The app that invoked the palette also exposes its focused element's remote token, so a
 second pass walks backward from that live id for up to two seconds. This reaches long-lived Chromium
 windows whose ids sit far beyond the low prefix without multiplying the deeper scan across every app.
-The work remains concurrent and never delays the initial palette. Live elements stay on main: the worker
-returns the remote element id, and activation reconstructs and revalidates it before hiding the palette.
-No Screen Recording grant is needed because titles come from AX rather than `kCGWindowName`.
+The work remains concurrent and never delays the initial palette. A small header spinner stays visible
+until the remote merge completes, making it clear that the first list is usable but not necessarily final.
+Its slot remains reserved after completion, so the search field never moves. Live elements stay on main:
+the worker returns the remote element id, and activation reconstructs and revalidates it before hiding
+the palette. No Screen Recording grant is needed because titles come from AX rather than
+`kCGWindowName`.
 
 The app icon rides on the entry as a `FileIconStamp` and its bundle URL, and the row draws it through
 `EntryIconView(source: .file(stamp:))` — so `IconCache` decodes once per app however many windows it

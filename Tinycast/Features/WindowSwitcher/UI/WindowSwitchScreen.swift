@@ -3,6 +3,7 @@ import SwiftUI
 struct WindowSwitchScreen: PaletteScreen {
     let session: WindowSwitchSession
     let core: AppCore
+    let metrics: InterfaceMetrics
 
     var rows: [WindowSwitchEntry] { session.filtered }
 
@@ -16,6 +17,25 @@ struct WindowSwitchScreen: PaletteScreen {
     }
 
     func secondary(at selection: Int) -> Bool { false }
+
+    func headerAccessory(
+        at selection: Int, focus: FocusState<String?>.Binding
+    ) -> PaletteHeaderAccessory? {
+        PaletteHeaderAccessory(
+            width: metrics.spacing.md + metrics.size.rowIcon,
+            fieldNames: [], firstIncompleteField: nil,
+            placement: .besideSearchField,
+            view: AnyView(
+                HStack(spacing: 0) {
+                    Color.clear.frame(width: metrics.spacing.md)
+                    ProgressView()
+                        .controlSize(.small)
+                        .frame(width: metrics.size.rowIcon, height: metrics.size.rowIcon)
+                        .opacity(session.isDiscovering ? 1 : 0)
+                        .accessibilityLabel("Discovering windows")
+                        .accessibilityHidden(!session.isDiscovering)
+                }))
+    }
 
     func body(selection: Int, scroll: ScrollIntent) -> AnyView {
         AnyView(content(selection: selection, scroll: scroll))

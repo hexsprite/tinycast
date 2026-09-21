@@ -76,11 +76,25 @@ enum AXWindowAccess {
         return elementID
     }
 
+    nonisolated static func focusedElementID(for pid: pid_t, timeout: Float) -> UInt64? {
+        let application = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(application, timeout)
+        var value: CFTypeRef?
+        guard
+            AXUIElementCopyAttributeValue(
+                application, kAXFocusedUIElementAttribute as CFString, &value) == .success,
+            let value, CFGetTypeID(value) == AXUIElementGetTypeID()
+        else { return nil }
+        // Type checked by CFGetTypeID above; `as?` on a CF type is a compile error.
+        return elementID(of: value as! AXUIElement)
+    }
+
     nonisolated static func remoteWindows(
         for pid: pid_t, matching targetIDs: Set<UInt32>, budgetMilliseconds: Double,
-        timeout: Float, startingAt startElementID: UInt64 = 0, descending: Bool = false
+        timeout: Float, startingAt startElementID: UInt64 = 0, descending: Bool = false,
+        stride: UInt64 = 1
     ) -> [RemoteWindow] {
-        guard !targetIDs.isEmpty, let token = remoteToken(for: pid),
+        guard !targetIDs.isEmpty, stride > 0, let token = remoteToken(for: pid),
             let bytes = CFDataGetMutableBytePtr(token)
         else { return [] }
         var remaining = targetIDs
@@ -93,19 +107,25 @@ enum AXWindowAccess {
             if Task.isCancelled { break }
             var tokenElementID = elementID
             memcpy(bytes + 12, &tokenElementID, 8)
-            if let window = _AXUIElementCreateWithRemoteToken(token)?.takeRetainedValue() {
-                AXUIElementSetMessagingTimeout(window, timeout)
-                if let windowID = windowID(of: window), remaining.contains(windowID),
-                    string(window, kAXRoleAttribute) == (kAXWindowRole as String),
-                    string(window, kAXSubroleAttribute) == (kAXStandardWindowSubrole as String)
-                {
-                    found.append(
-                        RemoteWindow(
-                            windowID: windowID, elementID: elementID,
-                            title: string(window, kAXTitleAttribute) ?? "",
-                            isMinimized: bool(window, kAXMinimizedAttribute) == true))
-                    remaining.remove(windowID)
-                    if remaining.isEmpty { break }
+            if let candidate = _AXUIElementCreateWithRemoteToken(token)?.takeRetainedValue() {
+                AXUIElementSetMessagingTimeout(candidate, timeout)
+                if let windowID = windowID(of: candidate), remaining.contains(windowID) {
+                    let window = containingWindow(of: candidate) ?? candidate
+                    AXUIElementSetMessagingTimeout(window, timeout)
+                    if AXWindowAccess.windowID(of: window) == windowID,
+                        string(window, kAXRoleAttribute) == (kAXWindowRole as String),
+                        string(window, kAXSubroleAttribute)
+                            == (kAXStandardWindowSubrole as String),
+                        let windowElementID = AXWindowAccess.elementID(of: window)
+                    {
+                        found.append(
+                            RemoteWindow(
+                                windowID: windowID, elementID: windowElementID,
+                                title: string(window, kAXTitleAttribute) ?? "",
+                                isMinimized: bool(window, kAXMinimizedAttribute) == true))
+                        remaining.remove(windowID)
+                        if remaining.isEmpty { break }
+                    }
                 }
             }
             iterations += 1
@@ -115,11 +135,11 @@ enum AXWindowAccess {
                 break
             }
             if descending {
-                guard elementID > 0 else { break }
-                elementID -= 1
+                guard elementID >= stride else { break }
+                elementID -= stride
             } else {
-                guard elementID < .max else { break }
-                elementID += 1
+                guard elementID <= UInt64.max - stride else { break }
+                elementID += stride
             }
         }
         return found
@@ -141,6 +161,16 @@ enum AXWindowAccess {
             string(window, kAXSubroleAttribute) == (kAXStandardWindowSubrole as String)
         else { return nil }
         return window
+    }
+
+    nonisolated private static func containingWindow(of element: AXUIElement) -> AXUIElement? {
+        var value: CFTypeRef?
+        guard
+            AXUIElementCopyAttributeValue(element, kAXWindowAttribute as CFString, &value) == .success,
+            let value, CFGetTypeID(value) == AXUIElementGetTypeID()
+        else { return nil }
+        // Type checked by CFGetTypeID above; `as?` on a CF type is a compile error.
+        return (value as! AXUIElement)
     }
 
     // The AX remote-token ABI is pid, zero, `coco`, then the 64-bit element id.

@@ -7,6 +7,7 @@ enum WindowSwitchSweep {
     /// A sweep walks every app, so one hung process must not cost the full mover timeout.
     nonisolated private static let sweepTimeout: Float = 0.2
     nonisolated private static let remoteBudgetMilliseconds = 250.0
+    nonisolated private static let anchoredRemoteBudgetMilliseconds = 500.0
     nonisolated private static let sourceRemoteBudgetMilliseconds = 2_000.0
     nonisolated private static let minimumServerWindowSize = CGSize(width: 80, height: 60)
 
@@ -24,7 +25,7 @@ enum WindowSwitchSweep {
         let iconURL: URL?
         let iconStamp: Int
         let appRank: Int
-        let scanAnchorElementID: UInt64?
+        let isSource: Bool
     }
 
     struct RemoteReference: Sendable {
@@ -62,16 +63,11 @@ enum WindowSwitchSweep {
             let iconStamp = iconURL.map(FileIconStamp.value(for:)) ?? 0
             let appName = app.localizedName ?? bundleID
             let appRank = ranks[pid] ?? .max
-            let scanAnchorElementID =
-                pid == sourcePID
-                ? AXWindowAccess.element(application, kAXFocusedUIElementAttribute).flatMap(
-                    AXWindowAccess.elementID(of:)) : nil
             var order = 0
             applications.append(
                 Application(
                     pid: pid, appName: appName, bundleID: bundleID, iconURL: iconURL,
-                    iconStamp: iconStamp, appRank: appRank,
-                    scanAnchorElementID: scanAnchorElementID))
+                    iconStamp: iconStamp, appRank: appRank, isSource: pid == sourcePID))
 
             func append(_ window: AXUIElement) {
                 AXUIElementSetMessagingTimeout(window, sweepTimeout)
@@ -115,13 +111,26 @@ enum WindowSwitchSweep {
                     var windows = AXWindowAccess.remoteWindows(
                         for: application.pid, matching: targetIDs,
                         budgetMilliseconds: remoteBudgetMilliseconds, timeout: sweepTimeout)
-                    let unresolved = targetIDs.subtracting(windows.map(\.windowID))
-                    if let anchor = application.scanAnchorElementID, !unresolved.isEmpty {
+                    var unresolved = targetIDs.subtracting(windows.map(\.windowID))
+                    if !unresolved.isEmpty,
+                        let anchor = AXWindowAccess.focusedElementID(
+                            for: application.pid, timeout: sweepTimeout)
+                    {
                         windows.append(
                             contentsOf: AXWindowAccess.remoteWindows(
                                 for: application.pid, matching: unresolved,
-                                budgetMilliseconds: sourceRemoteBudgetMilliseconds,
-                                timeout: sweepTimeout, startingAt: anchor, descending: true))
+                                budgetMilliseconds: anchoredRemoteBudgetMilliseconds,
+                                timeout: sweepTimeout, startingAt: anchor, descending: true,
+                                stride: 64))
+                        unresolved = targetIDs.subtracting(windows.map(\.windowID))
+                        if application.isSource, !unresolved.isEmpty {
+                            windows.append(
+                                contentsOf: AXWindowAccess.remoteWindows(
+                                    for: application.pid, matching: unresolved,
+                                    budgetMilliseconds: sourceRemoteBudgetMilliseconds,
+                                    timeout: sweepTimeout, startingAt: anchor,
+                                    descending: true))
+                        }
                     }
                     var entries: [WindowSwitchEntry] = []
                     var references: [UInt32: RemoteReference] = [:]

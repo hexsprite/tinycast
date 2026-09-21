@@ -13,8 +13,11 @@ launcher and a still-recorded shortcut for either does nothing.
 
 - **The visible-Space sweep is synchronous; the other-Space sweep is bounded and concurrent.** The
   first opens the palette immediately from `AXWindows`, focused and main. The second asks WindowServer
-  for missing ids, gives each app 250 ms on a task-group child, and gives the invoking app one deeper
-  anchored pass for sparse ids. Only verified standard windows merge. A revision prevents stale results.
+  for missing ids, gives each app a 250 ms low-id pass and a 500 ms sparse focused-element probe, then
+  gives the invoking app up to two seconds of dense scanning when ids remain unresolved. A matching
+  descendant resolves its containing
+  window rather than waiting to reach the much older root id. Only verified standard windows merge. A
+  revision prevents stale results.
 - **A live `AXUIElement` never crosses an actor and never outlives the show.** The background sweep
   returns only pid, WindowServer id, AX element id and row metadata. `WindowSwitchSession` retains live
   published elements and remote references `@ObservationIgnored`, and drops both in `reset()`.
@@ -70,9 +73,14 @@ must be an `AXStandardWindow`; minimized windows remain valid, and geometry is n
 WindowServer's `.optionAll` list then names candidate ids absent from the fast result. A task-group
 child per app walks remote AX element ids through `_AXUIElementCreateWithRemoteToken`, matches them back
 with `_AXUIElementGetWindow`, and publishes only verified standard-window roots. Every app gets a 250 ms
-low-id pass. The app that invoked the palette also exposes its focused element's remote token, so a
-second pass walks backward from that live id for up to two seconds. This reaches long-lived Chromium
-windows whose ids sit far beyond the low prefix without multiplying the deeper scan across every app.
+low-id pass. An app with unresolved ids then exposes its focused element's remote token for a 500 ms
+backward probe that samples every 64th id. Chromium accessibility trees occupy broad id runs, so a sampled
+descendant can identify the missing WindowServer window without walking every id. The app that invoked
+the palette follows with up to two seconds of dense scanning only when the probe found nothing. A matching
+descendant yields its containing `AXWindow`, so the scan need not reach that window's older root id. The
+root must still report the same WindowServer id, preventing auxiliary Chromium surfaces from duplicating
+the standard window. This reaches long-lived Chromium windows whose ids sit far beyond the low prefix
+without multiplying the deepest scan across every app.
 The work remains concurrent and never delays the initial palette. A small header spinner stays visible
 until the remote merge completes, making it clear that the first list is usable but not necessarily final.
 Its slot remains reserved after completion, so the search field never moves. Live elements stay on main:

@@ -27,6 +27,9 @@ launcher and a still-recorded shortcut for either does nothing.
 - **The order is total.** `(isMinimized, appRank, appName, appOrder, windowID)` — so a sweep that
   enumerated apps in a different order sorts identically, and minimized windows are always one run at
   the end rather than interleaved. Remote-only windows follow the app's published windows.
+- **A Tinycast switch remembers its source window and destination app.** If that app is still current
+  on the next summon, the exact focused source window is first and Return switches straight back. Any
+  other current app clears the pair, so ordinary app changes never leave a stale preference behind.
 - **Accessibility is gated twice**, on show and again on activate: a grant revoked while the palette
   is open must not reach `AXUIElementPerformAction`.
 - **Activation hides with `restoreFocus: false`.** Restoring focus reactivates the displaced app,
@@ -100,6 +103,10 @@ orders the window inside an app that is not frontmost, and activating alone brin
 front window forward rather than the chosen one. Activating is also what pulls another Space forward,
 so the switcher needs no Space handling of its own.
 
+The sweep records each app's exact focused window id. The coordinator pairs that source with the
+chosen destination app, then promotes the source only while that app remains current. Activating it
+records the reverse, which makes a bare Return toggle without an observer or persisted history.
+
 Every step is allowed to fail quietly. What is reported is only the case the user can act on: the
 window's app quit between the sweep and the ↵.
 
@@ -136,8 +143,9 @@ window's app quit between the sweep and the ↵.
 ## Testing
 
 `Tests/window-switch-test.swift` covers the pure half: the WindowServer-derived id, untitled-window
-fallback, name/owner search fields, MRU order and totality, remote-result merging and deduplication,
-the minimized run at the end, ranking, and the 200-row cap under empty and matching queries.
+fallback, name/owner search fields, MRU order and totality, switch-back preference, remote-result
+merging and deduplication, the minimized run at the end, ranking, and the 200-row cap under empty and
+matching queries.
 
 `WindowZOrder` and `WindowSwitchSweep` are not compiled into the harness and have no automated
 coverage — the AX and `CGWindowList` paths need manual verification, particularly:

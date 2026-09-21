@@ -11,6 +11,9 @@ func _AXUIElementGetWindow(
 @_silgen_name("_AXUIElementCreateWithRemoteToken")
 func _AXUIElementCreateWithRemoteToken(_ data: CFData) -> Unmanaged<AXUIElement>?
 
+@_silgen_name("_AXUIElementRemoteTokenCreate")
+func _AXUIElementRemoteTokenCreate(_ element: AXUIElement) -> Unmanaged<CFData>?
+
 /// Every `AXUIElement` call in the feature. Shared, so the mover and the layout runner cannot
 /// disagree about what a window is or how one is written.
 @MainActor
@@ -63,9 +66,19 @@ enum AXWindowAccess {
         return windowID
     }
 
+    nonisolated static func elementID(of element: AXUIElement) -> UInt64? {
+        guard let token = _AXUIElementRemoteTokenCreate(element)?.takeRetainedValue(),
+            CFDataGetLength(token) >= 20
+        else { return nil }
+        guard let bytes = CFDataGetBytePtr(token) else { return nil }
+        var elementID: UInt64 = 0
+        memcpy(&elementID, bytes + 12, 8)
+        return elementID
+    }
+
     nonisolated static func remoteWindows(
         for pid: pid_t, matching targetIDs: Set<UInt32>, budgetMilliseconds: Double,
-        timeout: Float
+        timeout: Float, startingAt startElementID: UInt64 = 0, descending: Bool = false
     ) -> [RemoteWindow] {
         guard !targetIDs.isEmpty, let token = remoteToken(for: pid),
             let bytes = CFDataGetMutableBytePtr(token)
@@ -73,11 +86,13 @@ enum AXWindowAccess {
         var remaining = targetIDs
         var found: [RemoteWindow] = []
         let start = ProcessInfo.processInfo.systemUptime
+        var elementID = startElementID
+        var iterations = 0
 
-        for elementID in UInt64.min..<UInt64.max {
+        while true {
             if Task.isCancelled { break }
-            var elementID = elementID
-            memcpy(bytes + 12, &elementID, 8)
+            var tokenElementID = elementID
+            memcpy(bytes + 12, &tokenElementID, 8)
             if let window = _AXUIElementCreateWithRemoteToken(token)?.takeRetainedValue() {
                 AXUIElementSetMessagingTimeout(window, timeout)
                 if let windowID = windowID(of: window), remaining.contains(windowID),
@@ -93,10 +108,18 @@ enum AXWindowAccess {
                     if remaining.isEmpty { break }
                 }
             }
-            if elementID.isMultiple(of: 64),
+            iterations += 1
+            if iterations.isMultiple(of: 64),
                 (ProcessInfo.processInfo.systemUptime - start) * 1_000 >= budgetMilliseconds
             {
                 break
+            }
+            if descending {
+                guard elementID > 0 else { break }
+                elementID -= 1
+            } else {
+                guard elementID < .max else { break }
+                elementID += 1
             }
         }
         return found

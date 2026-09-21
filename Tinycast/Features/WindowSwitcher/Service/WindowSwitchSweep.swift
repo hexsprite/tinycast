@@ -7,6 +7,7 @@ enum WindowSwitchSweep {
     /// A sweep walks every app, so one hung process must not cost the full mover timeout.
     nonisolated private static let sweepTimeout: Float = 0.2
     nonisolated private static let remoteBudgetMilliseconds = 250.0
+    nonisolated private static let sourceRemoteBudgetMilliseconds = 2_000.0
     nonisolated private static let minimumServerWindowSize = CGSize(width: 80, height: 60)
 
     /// Live AX handles for one window. Never `Sendable`: these do not leave the main actor.
@@ -23,6 +24,7 @@ enum WindowSwitchSweep {
         let iconURL: URL?
         let iconStamp: Int
         let appRank: Int
+        let scanAnchorElementID: UInt64?
     }
 
     struct RemoteReference: Sendable {
@@ -47,7 +49,7 @@ enum WindowSwitchSweep {
         let windowID: UInt32
     }
 
-    static func snapshot(ranks: [pid_t: Int]) -> Snapshot {
+    static func snapshot(ranks: [pid_t: Int], sourcePID: pid_t?) -> Snapshot {
         var entries: [WindowSwitchEntry] = []
         var elements: [UInt32: Element] = [:]
         var applications: [Application] = []
@@ -60,11 +62,16 @@ enum WindowSwitchSweep {
             let iconStamp = iconURL.map(FileIconStamp.value(for:)) ?? 0
             let appName = app.localizedName ?? bundleID
             let appRank = ranks[pid] ?? .max
+            let scanAnchorElementID =
+                pid == sourcePID
+                ? AXWindowAccess.element(application, kAXFocusedUIElementAttribute).flatMap(
+                    AXWindowAccess.elementID(of:)) : nil
             var order = 0
             applications.append(
                 Application(
                     pid: pid, appName: appName, bundleID: bundleID, iconURL: iconURL,
-                    iconStamp: iconStamp, appRank: appRank))
+                    iconStamp: iconStamp, appRank: appRank,
+                    scanAnchorElementID: scanAnchorElementID))
 
             func append(_ window: AXUIElement) {
                 AXUIElementSetMessagingTimeout(window, sweepTimeout)
@@ -105,9 +112,17 @@ enum WindowSwitchSweep {
                 }
                 group.addTask {
                     let targetIDs = Set(candidates.map(\.windowID))
-                    let windows = AXWindowAccess.remoteWindows(
+                    var windows = AXWindowAccess.remoteWindows(
                         for: application.pid, matching: targetIDs,
                         budgetMilliseconds: remoteBudgetMilliseconds, timeout: sweepTimeout)
+                    let unresolved = targetIDs.subtracting(windows.map(\.windowID))
+                    if let anchor = application.scanAnchorElementID, !unresolved.isEmpty {
+                        windows.append(
+                            contentsOf: AXWindowAccess.remoteWindows(
+                                for: application.pid, matching: unresolved,
+                                budgetMilliseconds: sourceRemoteBudgetMilliseconds,
+                                timeout: sweepTimeout, startingAt: anchor, descending: true))
+                    }
                     var entries: [WindowSwitchEntry] = []
                     var references: [UInt32: RemoteReference] = [:]
                     for window in windows {

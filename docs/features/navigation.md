@@ -13,8 +13,8 @@ launcher and a still-recorded shortcut for either does nothing.
 
 - **The visible-Space sweep is synchronous; the other-Space sweep is bounded and concurrent.** The
   first opens the palette immediately from `AXWindows`, focused and main. The second asks WindowServer
-  for missing ids, gives each app 250 ms on a task-group child, and merges only verified standard
-  windows. A revision prevents a closed or replaced screen from publishing stale results.
+  for missing ids, gives each app 250 ms on a task-group child, and gives the invoking app one deeper
+  anchored pass for sparse ids. Only verified standard windows merge. A revision prevents stale results.
 - **A live `AXUIElement` never crosses an actor and never outlives the show.** The background sweep
   returns only pid, WindowServer id, AX element id and row metadata. `WindowSwitchSession` retains live
   published elements and remote references `@ObservationIgnored`, and drops both in `reset()`.
@@ -69,11 +69,13 @@ must be an `AXStandardWindow`; minimized windows remain valid, and geometry is n
 
 WindowServer's `.optionAll` list then names candidate ids absent from the fast result. A task-group
 child per app walks remote AX element ids through `_AXUIElementCreateWithRemoteToken`, matches them back
-with `_AXUIElementGetWindow`, and publishes only verified standard-window roots. The 250 ms per-app
-budget runs concurrently, so a sparse or hung AX tree cannot delay the palette or another app's result.
-Live elements stay on main: the worker returns the remote element id, and activation reconstructs and
-revalidates it before hiding the palette. No Screen Recording grant is needed because titles come from
-AX rather than `kCGWindowName`.
+with `_AXUIElementGetWindow`, and publishes only verified standard-window roots. Every app gets a 250 ms
+low-id pass. The app that invoked the palette also exposes its focused element's remote token, so a
+second pass walks backward from that live id for up to two seconds. This reaches long-lived Chromium
+windows whose ids sit far beyond the low prefix without multiplying the deeper scan across every app.
+The work remains concurrent and never delays the initial palette. Live elements stay on main: the worker
+returns the remote element id, and activation reconstructs and revalidates it before hiding the palette.
+No Screen Recording grant is needed because titles come from AX rather than `kCGWindowName`.
 
 The app icon rides on the entry as a `FileIconStamp` and its bundle URL, and the row draws it through
 `EntryIconView(source: .file(stamp:))` — so `IconCache` decodes once per app however many windows it

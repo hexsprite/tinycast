@@ -42,7 +42,9 @@ final class WindowSwitchCoordinator {
             return
         }
         remoteTask?.cancel()
-        let snapshot = WindowSwitchSweep.snapshot(ranks: WindowZOrder.appRanks())
+        let snapshot = WindowSwitchSweep.snapshot(
+            ranks: WindowZOrder.appRanks(),
+            sourcePID: paletteCoordinator.targetApp?.processIdentifier)
         let applications = snapshot.applications
         let knownWindowIDs = Set(snapshot.entries.map(\.windowID))
         let revision = session.present(snapshot)

@@ -45,6 +45,15 @@ final class WindowSwitchCoordinator {
             Task { await self.reportPermissionFailure() }
             return
         }
+        paletteCoordinator.togglePalette(mode: .switchWindows)
+    }
+
+    /// Every open sweeps anew, a restore included: hiding dropped the last snapshot.
+    func load() {
+        guard Permissions.ensureAccessibility() else {
+            Task { await self.reportPermissionFailure() }
+            return
+        }
         remoteTask?.cancel()
         let sourcePID = paletteCoordinator.targetApp?.processIdentifier
         let snapshot = WindowSwitchSweep.snapshot(
@@ -54,7 +63,6 @@ final class WindowSwitchCoordinator {
         let applications = snapshot.applications
         let knownWindowIDs = Set(snapshot.entries.map(\.windowID))
         let revision = session.present(snapshot, preferredWindowID: preferredWindowID)
-        paletteCoordinator.togglePalette(mode: .switchWindows)
         remoteTask = Task { [weak self] in
             let remote = await WindowSwitchSweep.remoteSnapshot(
                 applications: applications, excluding: knownWindowIDs)

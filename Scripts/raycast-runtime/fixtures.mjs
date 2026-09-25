@@ -38,7 +38,7 @@ async function run(name, source, mode, verify, options) {
   harness.boot(bootConfig());
   const code = compile(source);
   harness.start("s1", code, "/fixtures/cmd.js", "/fixtures", mode, {});
-  await wait();
+  await wait(options?.settle);
   await verify(harness);
   harness.stop("s1");
 }
@@ -357,7 +357,15 @@ export default async function Command() {
     child.on("close", () => resolve(chunks.join("")));
   });
 
-  globalThis.__spawn = { iterated: iterated.join(""), late, grouped };
+  const streamed = await new Promise((resolve) => {
+    const events = [];
+    const child = spawn("/bin/sh", ["-c", "echo a; sleep 0.2; echo b"]);
+    child.on("spawn", () => events.push("spawn"));
+    child.stdout.once("data", () => events.push(child.exitCode === null ? "live" : "after-exit"));
+    child.on("close", () => resolve(events.join(",")));
+  });
+
+  globalThis.__spawn = { iterated: iterated.join(""), late, grouped, streamed };
 }
 `;
 
@@ -472,6 +480,46 @@ export default async function Command() {
     });
     request.end();
   });
+}
+`;
+
+// A member `__toESM` cannot see lands as an opaque `The superclass is not a constructor`.
+const namespaceImportSource = `
+import * as net from "node:net";
+import * as vm from "node:vm";
+import { AsyncResource } from "node:async_hooks";
+import { Socket } from "node:net";
+
+class Tracked extends AsyncResource {
+  constructor() {
+    super("tracked");
+    this.seen = [];
+  }
+  record(value) {
+    return this.runInAsyncScope(() => {
+      this.seen.push(value);
+      return this.seen.length;
+    });
+  }
+}
+
+export default async function Command() {
+  const refusal = (fn) => {
+    try {
+      fn();
+      return "none";
+    } catch (error) {
+      return error.message;
+    }
+  };
+  const tracked = new Tracked();
+  globalThis.__namespaceImport = {
+    kinds: [typeof net.Socket, typeof Socket, typeof vm.Script, typeof AsyncResource],
+    keys: Object.keys(net).filter((key) => key !== "default"),
+    refusals: [refusal(() => new net.Socket()), refusal(() => vm.runInNewContext("1"))],
+    scope: [tracked.record("a"), tracked.record("b"), tracked.seen.join("")],
+    type: tracked.type,
+  };
 }
 `;
 
@@ -931,7 +979,8 @@ export async function runFixtures() {
     check("async iteration collects stdout", result?.iterated === "hello\n", JSON.stringify(result?.iterated));
     check("a listener attached after exit still gets it", result?.late === "world\n", JSON.stringify(result?.late));
     check("a detached child that pipes stdout is still awaited", result?.grouped === "group\n", JSON.stringify(result?.grouped));
-  });
+    check("output streams before exit, after spawn", result?.streamed === "spawn,live", JSON.stringify(result?.streamed));
+  }, { settle: 800 });
 
   const httpSpecs = [];
   await run(
@@ -1033,6 +1082,17 @@ export async function runFixtures() {
 
   const cookieSpecs = [];
   const cookies = ["a=1; Expires=Wed, 21 Oct 2037 07:28:00 GMT; Path=/", "b=2; Path=/"];
+  await run("a namespace import keeps the shim's named members", namespaceImportSource, "no-view", async (harness) => {
+    const result = harness.call("globalThis.__namespaceImport");
+    const kinds = JSON.stringify(result?.kinds);
+    check("every member survives the own-key snapshot", kinds === JSON.stringify(["function", "function", "function", "function"]), kinds);
+    check("net enumerates its exports", result?.keys?.includes("Socket") && result.keys.includes("createConnection"), JSON.stringify(result?.keys));
+    check("an unsupported member still refuses by name", result?.refusals?.[0]?.startsWith("net.Socket is not supported"), JSON.stringify(result?.refusals));
+    check("a refusal names the member that was called", result?.refusals?.[1]?.startsWith("vm.runInNewContext is not supported"), JSON.stringify(result?.refusals));
+    check("AsyncResource runs the callback in place", JSON.stringify(result?.scope) === JSON.stringify([1, 2, "ab"]), JSON.stringify(result?.scope));
+    check("AsyncResource keeps its type", result?.type === "tracked", String(result?.type));
+  });
+
   await run(
     "an http.Agent subclass carries cookies between requests",
     cookieAgentSource,
@@ -1136,6 +1196,48 @@ export async function runFixtures() {
     const dump = describeTree(harness.state.trees.at(-1));
     check("finishes loading", dump.includes("isLoading=false"), dump);
     check("renders the resolved items", dump.includes("alpha") && dump.includes("beta"));
+  });
+
+  await run("Menu bar hooks, alternates and async actions", `
+    import { MenuBarExtra } from "@raycast/api";
+    import { useEffect, useState } from "react";
+    function Alternate() {
+      const [title] = useState("Alternate");
+      return <MenuBarExtra.Item title={title} onAction={() => { globalThis.clicked = "alternate"; }} />;
+    }
+    export default function Command() {
+      const [loading, setLoading] = useState(true);
+      const [title, setTitle] = useState("Before");
+      useEffect(() => { setLoading(false); }, []);
+      return <MenuBarExtra title={title} isLoading={loading} tooltip="Usage">
+        <MenuBarExtra.Section title="Providers">
+          <MenuBarExtra.Item title="Refresh" alternate={<Alternate />} onAction={async (event) => {
+            await new Promise(resolve => setTimeout(resolve, 40));
+            globalThis.clicked = event.type;
+            setTitle("After");
+          }} />
+        </MenuBarExtra.Section>
+      </MenuBarExtra>;
+    }
+  `, "menu-bar", async (harness) => {
+    const tree = harness.state.trees.at(-1);
+    const root = findNode(tree, "MenuBarExtra");
+    const item = findNode(tree, "MenuBarExtra.Item");
+    check("menu-bar mounts hooks", root?.props.isLoading === false && !harness.state.finished);
+    check("alternate mounts through a slot", item?.props.alternate?.props.title === "Alternate");
+    check("alternate retains callback", typeof item?.props.alternate?.props.onAction?.$fn === "string");
+    harness.call(`__tinycast.dispatch("s1", ${JSON.stringify(item.props.onAction.$fn)}, '[{"type":"right-click"}]', true)`);
+    check("async action keeps session alive", !harness.state.finished);
+    await wait(100);
+    check("action receives click type", harness.call("globalThis.clicked") === "right-click");
+    check("async action completes", harness.state.finished);
+    check("action updates menu title", findNode(harness.state.trees.at(-1), "MenuBarExtra")?.props.title === "After");
+  });
+
+  await run("Menu bar can remove its item", `
+    export default function Command() { return null; }
+  `, "menu-bar", async (harness) => {
+    check("null commits an empty screen", harness.state.trees.length > 0 && !findNode(harness.state.trees.at(-1), "MenuBarExtra"));
   });
 
   console.log("\n▶ Errors surface instead of crashing");

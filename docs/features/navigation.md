@@ -20,7 +20,10 @@ launcher and a still-recorded shortcut for either does nothing.
   revision prevents stale results.
 - **A live `AXUIElement` never crosses an actor and never outlives the show.** The background sweep
   returns only pid, WindowServer id, AX element id and row metadata. `WindowSwitchSession` retains live
-  published elements and remote references `@ObservationIgnored`, and drops both in `reset()`.
+  published elements and remote references `@ObservationIgnored`, and drops both in `reset()`, which
+  `hidePalette` and every mode change call. So every open sweeps anew —
+  `WindowSwitchCoordinator.load()`, through `PaletteCoordinator.onScreenOpening` — and a screen
+  restored inside the Pop to Root window lists today's windows, not an empty snapshot.
 - **Nothing in `Model/` knows what a window is.** `WindowSwitchEntry` takes `appRank` as a number
   someone else measured, so `WindowSwitchOrder` and `WindowSwitchQuery` stay Foundation-only and the
   harness compiles the shipped sources.
@@ -30,8 +33,9 @@ launcher and a still-recorded shortcut for either does nothing.
 - **A Tinycast switch remembers its source window and destination app.** If that app is still current
   on the next summon, the exact focused source window is first and Return switches straight back. Any
   other current app clears the pair, so ordinary app changes never leave a stale preference behind.
-- **Accessibility is gated twice**, on show and again on activate: a grant revoked while the palette
-  is open must not reach `AXUIElementPerformAction`.
+- **Accessibility is gated twice**, on open and again on activate: a grant revoked while the palette
+  is open must not reach `AXUIElementPerformAction`. The open gate sits in both `show()` and
+  `load()`, because a restore reaches `load()` alone.
 - **Activation hides with `restoreFocus: false`.** Restoring focus reactivates the displaced app,
   which races the raise and can land on the wrong window — the same reason a Space command does it.
 - **`AXWindowAccess` stays the one AX window layer.** `unminimize` and `focus` live there rather
